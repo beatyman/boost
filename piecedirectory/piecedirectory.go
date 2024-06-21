@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -322,19 +323,48 @@ func (ps *PieceDirectory) addIndexForPiece(ctx context.Context, pieceCid cid.Cid
 
 	// Try to parse data as containing a data segment index
 	log.Debugw("add index: read index", "pieceCid", pieceCid)
-	recs, err := parsePieceWithDataSegmentIndex(pieceCid, int64(dealInfo.PieceLength.Unpadded()), reader)
+	filename := fmt.Sprintf("/mnt/data/boostd/incoming/%s.car", pieceCid.String())
+	log.Debugw("add index: read index", "pieceCid", pieceCid, "car path", filename)
+	localFile, err := os.Create(filename)
 	if err != nil {
-		log.Infow("add index: data segment check failed. falling back to car", "pieceCid", pieceCid, "err", err)
-		// Iterate over all the blocks in the piece to extract the index records
-		if _, err := reader.Seek(0, io.SeekStart); err != nil {
-			return fmt.Errorf("seek to start for piece %s: %w", pieceCid, err)
-		}
-		recs, err = parseRecordsFromCar(reader)
-		if err != nil {
-			return fmt.Errorf("parse car for piece %s: %w", pieceCid, err)
-		}
+		log.Debugw("addIndexForPiece create tmp file ", filename, "err", err)
+		return err
 	}
+	defer func(name string) {
+		err := os.Remove(name)
+		if err != nil {
+			log.Debugw("addIndexForPiece remove tmp file ", filename, "err", err)
+		}
+	}(filename)
 
+	if _, err = io.Copy(localFile, reader); err != nil {
+		log.Debugw("addIndexForPiece copy to tmp file ", filename, "err", err)
+		return err
+	}
+	reader = localFile
+	if _, err := reader.Seek(0, io.SeekStart); err != nil {
+		log.Debugw("addIndexForPiece seek io ", filename, "err", err)
+		return fmt.Errorf("seek to start for piece %s: %w", pieceCid, err)
+	}
+	recs, err := parseRecordsFromCar(reader)
+	if err != nil {
+		log.Debugw("add index: read index", "pieceCid", pieceCid, "parseRecordsFromCar", err.Error())
+		return fmt.Errorf("parse car for piece %s: %w", pieceCid, err)
+	}
+	/*
+		recs, err := parsePieceWithDataSegmentIndex(pieceCid, int64(dealInfo.PieceLength.Unpadded()), reader)
+		if err != nil {
+			log.Infow("add index: data segment check failed. falling back to car", "pieceCid", pieceCid, "err", err)
+			// Iterate over all the blocks in the piece to extract the index records
+			if _, err := reader.Seek(0, io.SeekStart); err != nil {
+				return fmt.Errorf("seek to start for piece %s: %w", pieceCid, err)
+			}
+			recs, err = parseRecordsFromCar(reader)
+			if err != nil {
+				return fmt.Errorf("parse car for piece %s: %w", pieceCid, err)
+			}
+		}
+	*/
 	if len(recs) == 0 {
 		log.Warnw("add index: generated index with 0 recs", "pieceCid", pieceCid)
 		return nil
